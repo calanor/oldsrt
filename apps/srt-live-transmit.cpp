@@ -135,6 +135,7 @@ struct LiveTransmitConfig
     set<srt_logging::LogFA> logfas;
     bool log_internal;
     string logfile;
+    string ulogfile;
     int bw_report = 0;
     int stats_report = 0;
     string stats_out;
@@ -176,6 +177,7 @@ int parse_args(LiveTransmitConfig &cfg, int argc, char** argv)
         o_statspf       = { "pf", "statspf" },
         o_statsfull     = { "f", "fullstats" },
         o_loglevel      = { "ll", "loglevel" },
+        o_ulogfile      = { "ul", "ulogfile"},
         o_logfa         = { "logfa" },
         o_log_internal  = { "loginternal"},
         o_logfile       = { "logfile" },
@@ -195,6 +197,7 @@ int parse_args(LiveTransmitConfig &cfg, int argc, char** argv)
         { o_statspf,      OptionScheme::ARG_ONE },
         { o_statsfull,    OptionScheme::ARG_NONE },
         { o_loglevel,     OptionScheme::ARG_ONE },
+        { o_ulogfile,     OptionScheme::ARG_ONE },
         { o_logfa,        OptionScheme::ARG_ONE },
         { o_log_internal, OptionScheme::ARG_NONE },
         { o_logfile,      OptionScheme::ARG_ONE },
@@ -293,6 +296,7 @@ int parse_args(LiveTransmitConfig &cfg, int argc, char** argv)
 
     cfg.full_stats   = Option<OutBool>(params, false, o_statsfull);
     cfg.loglevel     = SrtParseLogLevel(Option<OutString>(params, "error", o_loglevel));
+    cfg.ulogfile     = Option<OutString>(params, "", o_ulogfile);
     cfg.logfas       = SrtParseLogFA(Option<OutString>(params, "", o_logfa));
     cfg.log_internal = Option<OutBool>(params, false, o_log_internal);
     cfg.logfile      = Option<OutString>(params, "", o_logfile);
@@ -401,6 +405,12 @@ int main(int argc, char** argv)
     }
 
     ostream &out_stats = logfile_stats.is_open() ? logfile_stats : cout;
+
+    if (cfg.ulogfile != "")
+    {
+       ulogfile = cfg.ulogfile;
+       ambUlogfile = true;
+    }
 
 #ifdef _WIN32
 

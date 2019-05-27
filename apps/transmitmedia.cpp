@@ -44,6 +44,9 @@ unsigned long transmit_chunk_size = SRT_LIVE_DEF_PLSIZE;
  PrintFormat printformat = PRINT_FORMAT_2COLS;
  bool first_line_printed = false;
 
+std::string ulogfile = "";
+bool ambUlogfile = false;
+
 
 class FileSource: public Source
 {
@@ -127,17 +130,24 @@ static void PrintSrtStats(int sid, const CBytePerfMon& mon, ostream &out)
         output << "},";
         output << "\"send\":{";
         output << "\"packets\":" << mon.pktSent << ",";
+        output << "\"packetsTotal\":" << mon.pktSentTotal << ",";
         output << "\"packetsLost\":" << mon.pktSndLoss << ",";
+        output << "\"packetsLostTotal\":" << mon.pktSndLossTotal << ",";
         output << "\"packetsDropped\":" << mon.pktSndDrop << ",";
+        output << "\"packetsDroppedTotal\":" << mon.pktSndDropTotal << ",";
         output << "\"packetsRetransmitted\":" << mon.pktRetrans << ",";        
+        output << "\"packetsRetransmittedTotal\":" << mon.pktRetransTotal << ",";
         output << "\"bytes\":" << mon.byteSent << ",";
         output << "\"bytesDropped\":" << mon.byteSndDrop << ",";
         output << "\"mbitRate\":" << mon.mbpsSendRate;
         output << "},";
         output << "\"recv\": {";
         output << "\"packets\":" << mon.pktRecv << ",";
+        output << "\"packetsTotal\":" << mon.pktRecvTotal << ",";
         output << "\"packetsLost\":" << mon.pktRcvLoss << ",";
+        output << "\"packetsLostTotal\":" << mon.pktRcvLossTotal << ",";
         output << "\"packetsDropped\":" << mon.pktRcvDrop << ",";
+        output << "\"packetsDroppedTotal\":" << mon.pktRcvDropTotal << ",";
         output << "\"packetsRetransmitted\":" << mon.pktRcvRetrans << ",";
         output << "\"packetsBelated\":" << mon.pktRcvBelated << ",";
         output << "\"bytes\":" << mon.byteRecv << ",";
@@ -207,6 +217,13 @@ static void PrintSrtStats(int sid, const CBytePerfMon& mon, ostream &out)
     }
 
     out << output.str() << std::flush;
+
+    if( ambUlogfile )
+    {
+       std::ofstream ofs(ulogfile, std::ofstream::out | std::ofstream::trunc);
+       ofs << output.str();
+       ofs.close();
+    }
 }
 
 static void PrintSrtBandwidth(double mbpsBandwidth)

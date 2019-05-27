@@ -31,6 +31,8 @@ enum PrintFormat
     PRINT_FORMAT_CSV
 };
 extern PrintFormat printformat;
+extern std::string ulogfile;
+extern bool ambUlogfile;
 
 class Location
 {

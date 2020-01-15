@@ -75,11 +75,15 @@ public:
 
    SRT_SOCKSTATUS m_Status;                  //< current socket state
 
-   uint64_t m_TimeStamp;                     //< time when the socket is closed
+   /// Time when the socket is closed.
+   /// When the socket is closed, it is not removed immediately from the list
+   /// of sockets in order to prevent other methods from accessing invalid address.
+   /// A timer is started and the socket will be removed after approximately
+   /// 1 second (see CUDTUnited::checkBrokenSockets()).
+   srt::sync::steady_clock::time_point m_tsClosureTimeStamp;
 
-   int m_iIPversion;                         //< IP version
-   sockaddr* m_pSelfAddr;                    //< pointer to the local address of the socket
-   sockaddr* m_pPeerAddr;                    //< pointer to the peer address of the socket
+   sockaddr_any m_SelfAddr;                    //< local address of the socket
+   sockaddr_any m_PeerAddr;                    //< peer address of the socket
 
    SRTSOCKET m_SocketID;                     //< socket ID
    SRTSOCKET m_ListenSocket;                 //< ID of the listener socket; 0 means this is an independent socket
@@ -141,11 +145,9 @@ public:
    int cleanup();
 
       /// Create a new UDT socket.
-      /// @param [in] af IP version, IPv4 (AF_INET) or IPv6 (AF_INET6).
-      /// @param [in] type (ignored)
       /// @return The new UDT socket ID, or INVALID_SOCK.
 
-   SRTSOCKET newSocket(int af, int );
+   SRTSOCKET newSocket();
 
       /// Create a new UDT connection.
       /// @param [in] listen the listening UDT socket;
@@ -153,7 +155,7 @@ public:
       /// @param [in,out] hs handshake information from peer side (in), negotiated value (out);
       /// @return If the new connection is successfully created: 1 success, 0 already exist, -1 error.
 
-   int newConnection(const SRTSOCKET listen, const sockaddr* peer, CHandShake* hs, const CPacket& hspkt,
+   int newConnection(const SRTSOCKET listen, const sockaddr_any& peer, CHandShake* hs, const CPacket& hspkt,
            ref_t<SRT_REJECT_REASON> r_error);
 
    int installAcceptHook(const SRTSOCKET lsn, srt_listen_callback_fn* hook, void* opaq);
@@ -172,14 +174,14 @@ public:
 
       // socket APIs
 
-   int bind(const SRTSOCKET u, const sockaddr* name, int namelen);
+   int bind(const SRTSOCKET u, const sockaddr_any& name);
    int bind(const SRTSOCKET u, UDPSOCKET udpsock);
    int listen(const SRTSOCKET u, int backlog);
    SRTSOCKET accept(const SRTSOCKET listen, sockaddr* addr, int* addrlen);
    int connect(const SRTSOCKET u, const sockaddr* name, int namelen, int32_t forced_isn);
    int close(const SRTSOCKET u);
-   int getpeername(const SRTSOCKET u, sockaddr* name, int* namelen);
-   int getsockname(const SRTSOCKET u, sockaddr* name, int* namelen);
+   void getpeername(const SRTSOCKET u, sockaddr* name, int* namelen);
+   void getsockname(const SRTSOCKET u, sockaddr* name, int* namelen);
    int select(ud_set* readfds, ud_set* writefds, ud_set* exceptfds, const timeval* timeout);
    int selectEx(const std::vector<SRTSOCKET>& fds, std::vector<SRTSOCKET>* readfds, std::vector<SRTSOCKET>* writefds, std::vector<SRTSOCKET>* exceptfds, int64_t msTimeOut);
    int epoll_create();
@@ -190,6 +192,8 @@ public:
    int epoll_update_usock(const int eid, const SRTSOCKET u, const int* events = NULL);
    int epoll_update_ssock(const int eid, const SYSSOCKET s, const int* events = NULL);
    int epoll_wait(const int eid, std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writefds, int64_t msTimeOut, std::set<SYSSOCKET>* lrfds = NULL, std::set<SYSSOCKET>* lwfds = NULL);
+   int epoll_uwait(const int eid, SRT_EPOLL_EVENT* fdsSet, int fdsSize, int64_t msTimeOut);
+   int32_t epoll_set(const int eid, int32_t flags);
    int epoll_release(const int eid);
 
       /// record the UDT exception.
@@ -208,7 +212,7 @@ private:
 private:
    std::map<SRTSOCKET, CUDTSocket*> m_Sockets;       // stores all the socket structures
 
-   pthread_mutex_t m_ControlLock;                    // used to synchronize UDT API
+   pthread_mutex_t m_GlobControlLock;                // used to synchronize UDT API
 
    pthread_mutex_t m_IDLock;                         // used to synchronize ID generation
    SRTSOCKET m_SocketIDGenerator;                             // seed to generate a new unique socket ID
@@ -220,10 +224,9 @@ private:
    static void TLSDestroy(void* e) {if (NULL != e) delete (CUDTException*)e;}
 
 private:
-   void connect_complete(const SRTSOCKET u);
    CUDTSocket* locate(const SRTSOCKET u);
-   CUDTSocket* locate(const sockaddr* peer, const SRTSOCKET id, int32_t isn);
-   void updateMux(CUDTSocket* s, const sockaddr* addr = NULL, const UDPSOCKET* = NULL);
+   CUDTSocket* locatePeer(const sockaddr_any& peer, const SRTSOCKET id, int32_t isn);
+   void updateMux(CUDTSocket* s, const sockaddr_any& addr, const UDPSOCKET* = NULL);
    void updateListenerMux(CUDTSocket* s, const CUDTSocket* ls);
 
 private:
@@ -258,17 +261,9 @@ private:
 };
 
 // Debug support
-inline std::string SockaddrToString(const sockaddr* sadr)
+inline std::string SockaddrToString(const sockaddr_any& sadr)
 {
-    void* addr =
-        sadr->sa_family == AF_INET ?
-        (void*)&((sockaddr_in*)sadr)->sin_addr
-        : sadr->sa_family == AF_INET6 ?
-        (void*)&((sockaddr_in6*)sadr)->sin6_addr
-        : 0;
-    // (cast to (void*) is required because otherwise the 2-3 arguments
-    // of ?: operator would have different types, which isn't allowed in C++.
-    if ( !addr )
+    if (sadr.family() != AF_INET && sadr.family() != AF_INET6)
         return "unknown:0";
 
     std::ostringstream output;
@@ -281,12 +276,12 @@ inline std::string SockaddrToString(const sockaddr* sadr)
     flags = NI_NUMERICHOST | NI_NUMERICSERV;
 #endif
 
-    if (!getnameinfo(sadr, sizeof(*sadr), hostbuf, 1024, NULL, 0, flags))
+    if (!getnameinfo(sadr.get(), sadr.size(), hostbuf, 1024, NULL, 0, flags))
     {
         output << hostbuf;
     }
 
-    output << ":" << ntohs(((sockaddr_in*)sadr)->sin_port); // TRICK: sin_port and sin6_port have the same offset and size
+    output << ":" << sadr.hport();
     return output.str();
 }
 

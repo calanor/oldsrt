@@ -13,11 +13,10 @@ written by
    Haivision Systems Inc.
  *****************************************************************************/
 
+#include "platform_sys.h"
+
 #include <iterator>
 #include <fstream>
-#if __APPLE__
-   #include "TargetConditionals.h"
-#endif
 #include "srt.h"
 #include "common.h"
 #include "core.h"
@@ -31,23 +30,8 @@ extern "C" {
 int srt_startup() { return CUDT::startup(); }
 int srt_cleanup() { return CUDT::cleanup(); }
 
-SRTSOCKET srt_socket(int af, int type, int protocol) { return CUDT::socket(af, type, protocol); }
-SRTSOCKET srt_create_socket()
-{
-    // XXX This must include rework around m_iIPVersion. This must be
-    // abandoned completely and all "IP VERSION" thing should rely on
-    // the exact specification in the 'sockaddr' objects passed to other functions,
-    // that is, the "current IP Version" remains undefined until any of
-    // srt_bind() or srt_connect() function is done. And when any of these
-    // functions are being called, the IP version is contained in the
-    // sockaddr object passed there.
-
-    // Until this rework is done, srt_create_socket() will set the
-    // default AF_INET family.
-
-    // Note that all arguments except the first one here are ignored.
-    return CUDT::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-}
+SRTSOCKET srt_socket(int , int , int ) { return CUDT::socket(); }
+SRTSOCKET srt_create_socket() { return CUDT::socket(); }
 
 int srt_bind(SRTSOCKET u, const struct sockaddr * name, int namelen) { return CUDT::bind(u, name, namelen); }
 int srt_bind_peerof(SRTSOCKET u, UDPSOCKET udpsock) { return CUDT::bind(u, udpsock); }
@@ -190,7 +174,6 @@ void srt_clearlasterror()
     UDT::getlasterror().clear();
 }
 
-int srt_perfmon(SRTSOCKET u, SRT_TRACEINFO * perf, int clear) { return CUDT::perfmon(u, perf, 0!=  clear); }
 int srt_bstats(SRTSOCKET u, SRT_TRACEBSTATS * perf, int clear) { return CUDT::bstats(u, perf, 0!=  clear); }
 int srt_bistats(SRTSOCKET u, SRT_TRACEBSTATS * perf, int clear, int instantaneous) { return CUDT::bstats(u, perf, 0!=  clear, 0!= instantaneous); }
 
@@ -207,21 +190,11 @@ int srt_epoll_add_ssock(int eid, SYSSOCKET s, const int * events)
 {
     int flag = 0;
 
-#ifdef LINUX
     if (events) {
         flag = *events;
-	} else {
+    } else {
         flag = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
     }
-#elif defined(BSD) || defined(OSX) || (TARGET_OS_IOS == 1) || (TARGET_OS_TV == 1)
-    if (events) {
-        flag = *events;
-	} else {
-        flag = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
-    }
-#else
-    flag = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
-#endif
 
     // call UDT native function
     return CUDT::epoll_add_ssock(eid, s, &flag);
@@ -232,53 +205,49 @@ int srt_epoll_remove_ssock(int eid, SYSSOCKET s) { return CUDT::epoll_remove_sso
 
 int srt_epoll_update_usock(int eid, SRTSOCKET u, const int * events)
 {
-	int srt_ev = 0;
-
-	if (events) {
-        srt_ev = *events;
-	} else {
-		srt_ev = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
-	}
-
-	return CUDT::epoll_update_usock(eid, u, &srt_ev);
+    return CUDT::epoll_update_usock(eid, u, events);
 }
 
 int srt_epoll_update_ssock(int eid, SYSSOCKET s, const int * events)
 {
     int flag = 0;
 
-#ifdef LINUX
     if (events) {
         flag = *events;
-	} else {
+    } else {
         flag = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
     }
-#elif defined(BSD) || defined(OSX) || (TARGET_OS_IOS == 1) || (TARGET_OS_TV == 1)
-    if (events) {
-        flag = *events;
-	} else {
-        flag = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
-    }
-#else
-    flag = SRT_EPOLL_IN | SRT_EPOLL_OUT | SRT_EPOLL_ERR;
-#endif
 
     // call UDT native function
     return CUDT::epoll_update_ssock(eid, s, &flag);
 }
 
 int srt_epoll_wait(
-		int eid,
-		SRTSOCKET* readfds, int* rnum, SRTSOCKET* writefds, int* wnum,
-		int64_t msTimeOut,
-        SYSSOCKET* lrfds, int* lrnum, SYSSOCKET* lwfds, int* lwnum)
-{
+      int eid,
+      SRTSOCKET* readfds, int* rnum, SRTSOCKET* writefds, int* wnum,
+      int64_t msTimeOut,
+      SYSSOCKET* lrfds, int* lrnum, SYSSOCKET* lwfds, int* lwnum)
+  {
     return UDT::epoll_wait2(
-    		eid,
-    		readfds, rnum, writefds, wnum,
-    		msTimeOut,
-    		lrfds, lrnum, lwfds, lwnum);
+        eid,
+        readfds, rnum, writefds, wnum,
+        msTimeOut,
+        lrfds, lrnum, lwfds, lwnum);
 }
+
+int srt_epoll_uwait(int eid, SRT_EPOLL_EVENT* fdsSet, int fdsSize, int64_t msTimeOut)
+{
+    return UDT::epoll_uwait(
+        eid,
+        fdsSet,
+        fdsSize,
+        msTimeOut);
+}
+
+// use this function to set flags. Default flags are always "everything unset".
+// Pass 0 here to clear everything, or nonzero to set a desired flag.
+// Pass -1 to not change anything (but still get the current flag value).
+int32_t srt_epoll_set(int eid, int32_t flags) { return CUDT::epoll_set(eid, flags); }
 
 int srt_epoll_release(int eid) { return CUDT::epoll_release(eid); }
 

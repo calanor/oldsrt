@@ -69,6 +69,7 @@ modified by
 #include "queue.h"
 #include "handshake.h"
 #include "congctl.h"
+#include "packetfilter.h"
 #include "utilities.h"
 
 #include <haicrypt.h>
@@ -82,7 +83,8 @@ extern Logger
     mglog,
     dlog,
     tslog,
-    rxlog;
+    rxlog,
+    cclog;
 
 }
 
@@ -156,6 +158,7 @@ class CUDT
     friend class CRcvQueue;
     friend class CSndUList;
     friend class CRcvUList;
+    friend class PacketFilter;
 
 private: // constructor and desctructor
 
@@ -169,7 +172,7 @@ private: // constructor and desctructor
 public: //API
     static int startup();
     static int cleanup();
-    static SRTSOCKET socket(int af, int type = SOCK_STREAM, int protocol = 0);
+    static SRTSOCKET socket();
     static int bind(SRTSOCKET u, const sockaddr* name, int namelen);
     static int bind(SRTSOCKET u, UDPSOCKET udpsock);
     static int listen(SRTSOCKET u, int backlog);
@@ -198,9 +201,10 @@ public: //API
     static int epoll_update_usock(const int eid, const SRTSOCKET u, const int* events = NULL);
     static int epoll_update_ssock(const int eid, const SYSSOCKET s, const int* events = NULL);
     static int epoll_wait(const int eid, std::set<SRTSOCKET>* readfds, std::set<SRTSOCKET>* writefds, int64_t msTimeOut, std::set<SYSSOCKET>* lrfds = NULL, std::set<SYSSOCKET>* wrfds = NULL);
+    static int epoll_uwait(const int eid, SRT_EPOLL_EVENT* fdsSet, int fdsSize, int64_t msTimeOut);
+    static int32_t epoll_set(const int eid, int32_t flags);
     static int epoll_release(const int eid);
     static CUDTException& getlasterror();
-    static int perfmon(SRTSOCKET u, CPerfMon* perf, bool clear = true);
     static int bstats(SRTSOCKET u, CBytePerfMon* perf, bool clear = true, bool instantaneous = false);
     static SRT_SOCKSTATUS getsockstate(SRTSOCKET u);
     static bool setstreamid(SRTSOCKET u, const std::string& sid);
@@ -231,6 +235,7 @@ public: // internal API
     static const int SRT_TLPKTDROP_MINTHRESHOLD_MS = 1000;
     static const uint64_t COMM_KEEPALIVE_PERIOD_US = 1*1000*1000;
     static const int32_t COMM_SYN_INTERVAL_US = 10*1000;
+    static const int COMM_CLOSE_BROKEN_LISTENER_TIMEOUT_MS = 3000;
 
     int handshakeVersion()
     {
@@ -267,8 +272,8 @@ public: // internal API
     int MSS() { return m_iMSS; }
     size_t maxPayloadSize() { return m_iMaxSRTPayloadSize; }
     size_t OPT_PayloadSize() { return m_zOPT_ExpPayloadSize; }
-    uint64_t minNAKInterval() { return m_ullMinNakInt_tk; }
     int32_t ISN() { return m_iISN; }
+    int sndLossLength() { return m_pSndLossList->getLossLength(); }
 
     // XXX See CUDT::tsbpd() to see how to implement it. This should
     // do the same as TLPKTDROP feature when skipping packets that are agreed
@@ -293,7 +298,7 @@ private:
     /// Connect to a UDT entity listening at address "peer".
     /// @param peer [in] The address of the listening UDT entity.
 
-    void startConnect(const sockaddr* peer, int32_t forced_isn);
+    void startConnect(const sockaddr_any& peer, int32_t forced_isn);
 
     /// Process the response handshake packet. Failure reasons can be:
     /// * Socket is not in connecting state
@@ -325,12 +330,12 @@ private:
     /// @param serv_addr incoming packet's address
     /// @param synchro True when this function was called in blocking mode
     /// @param rst Current read status to know if the HS packet was freshly received from the peer, or this is only a periodic update (RST_AGAIN)
-    SRT_ATR_NODISCARD EConnectStatus processRendezvous(ref_t<CPacket> reqpkt, const CPacket &response, const sockaddr* serv_addr, bool synchro, EReadStatus);
+    SRT_ATR_NODISCARD EConnectStatus processRendezvous(ref_t<CPacket> reqpkt, const CPacket &response, const sockaddr_any& serv_addr, bool synchro, EReadStatus);
     SRT_ATR_NODISCARD bool prepareConnectionObjects(const CHandShake &hs, HandshakeSide hsd, CUDTException *eout);
     SRT_ATR_NODISCARD EConnectStatus postConnect(const CPacket& response, bool rendezvous, CUDTException* eout, bool synchro);
     void applyResponseSettings();
     SRT_ATR_NODISCARD EConnectStatus processAsyncConnectResponse(const CPacket& pkt) ATR_NOEXCEPT;
-    SRT_ATR_NODISCARD bool processAsyncConnectRequest(EReadStatus rst, EConnectStatus cst, const CPacket& response, const sockaddr* serv_addr);
+    SRT_ATR_NODISCARD bool processAsyncConnectRequest(EReadStatus rst, EConnectStatus cst, const CPacket& response, const sockaddr_any& serv_addr);
 
     void checkUpdateCryptoKeyLen(const char* loghdr, int32_t typefield);
 
@@ -347,6 +352,7 @@ private:
     SRT_ATR_NODISCARD int processSrtMsg_HSREQ(const uint32_t* srtdata, size_t len, uint32_t ts, int hsv);
     SRT_ATR_NODISCARD int processSrtMsg_HSRSP(const uint32_t* srtdata, size_t len, uint32_t ts, int hsv);
     SRT_ATR_NODISCARD bool interpretSrtHandshake(const CHandShake& hs, const CPacket& hspkt, uint32_t* out_data, size_t* out_len);
+    SRT_ATR_NODISCARD bool checkApplyFilterConfig(const std::string& cs);
 
     void updateAfterSrtHandshake(int srt_cmd, int hsv);
 
@@ -359,7 +365,7 @@ private:
     /// @param peer [in] The address of the listening UDT entity.
     /// @param hs [in/out] The handshake information sent by the peer side (in), negotiated value (out).
 
-    void acceptAndRespond(const sockaddr* peer, CHandShake* hs, const CPacket& hspkt);
+    void acceptAndRespond(const sockaddr_any& peer, CHandShake* hs, const CPacket& hspkt);
     bool runAcceptHook(CUDT* acore, const sockaddr* peer, const CHandShake* hs, const CPacket& hspkt);
 
     /// Close the opened UDT entity.
@@ -438,12 +444,6 @@ private:
 
     void getOpt(SRT_SOCKOPT optName, void* optval, int& optlen);
 
-    /// read the performance data since last sample() call.
-    /// @param perf [in, out] pointer to a CPerfMon structure to record the performance data.
-    /// @param clear [in] flag to decide if the local performance trace should be cleared.
-
-    void sample(CPerfMon* perf, bool clear = true);
-
     /// read the performance data with bytes counters since bstats() 
     ///  
     /// @param perf [in, out] pointer to a CPerfMon structure to record the performance data.
@@ -456,9 +456,8 @@ private:
     /// removes the loss record from both current receiver loss list and
     /// the receiver fresh loss list.
     void unlose(const CPacket& oldpacket);
-    void unlose(int32_t from, int32_t to);
+    void dropFromLossLists(int32_t from, int32_t to);
 
-    void considerLegacySrtHandshake(uint64_t timebase);
     void checkSndTimers(Whether2RegenKm regen = DONT_REGEN_KM);
     void handshakeDone()
     {
@@ -524,10 +523,10 @@ private: // Identification
     linger m_Linger;                             // Linger information on close
     int m_iUDPSndBufSize;                        // UDP sending buffer size
     int m_iUDPRcvBufSize;                        // UDP receiving buffer size
-    int m_iIPversion;                            // IP version
     bool m_bRendezvous;                          // Rendezvous connection mode
+
 #ifdef SRT_ENABLE_CONNTIMEO
-    int m_iConnTimeOut;                          // connect timeout in milliseconds
+    srt::sync::steady_clock::duration m_tdConnTimeOut;    // connect timeout in milliseconds
 #endif
     int m_iSndTimeOut;                           // sending timeout in milliseconds
     int m_iRcvTimeOut;                           // receiving timeout in milliseconds
@@ -543,14 +542,12 @@ private: // Identification
     HaiCrypt_Secret m_CryptoSecret;
     int m_iSndCryptoKeyLen;
 
-    // XXX Consider removing them. The m_bDataSender may stay here
+    // XXX Consider removing. The m_bDataSender stays here
     // in order to maintain the HS side selection in HSv4.
-    // m_bTwoWayData is unused.
     bool m_bDataSender;
-    bool m_bTwoWayData;
 
     // HSv4 (legacy handshake) support)
-    uint64_t m_ullSndHsLastTime_us;	    //Last SRT handshake request time
+    srt::sync::steady_clock::time_point m_tsSndHsLastTime;	    //Last SRT handshake request time
     int      m_iSndHsRetryCnt;       //SRT handshake retries left
 
     bool m_bMessageAPI;
@@ -570,6 +567,7 @@ private: // Identification
     int m_iOverheadBW;                           // Percent above input stream rate (applies if m_llMaxBW == 0)
     bool m_bRcvNakReport;                        // Enable Receiver Periodic NAK Reports
     int m_iIpV6Only;                             // IPV6_V6ONLY option (-1 if not set)
+
 private:
     UniquePtr<CCryptoControl> m_pCryptoControl;                            // congestion control SRT class (small data extension)
     CCache<CInfoBlock>* m_pCache;                // network information cache
@@ -577,6 +575,12 @@ private:
     // Congestion control
     std::vector<EventSlot> m_Slots[TEV__SIZE];
     SrtCongestion m_CongCtl;
+
+    // Packet filtering
+    PacketFilter m_PacketFilter;
+    std::string m_OPT_PktFilterConfigString;
+    SRT_ARQLevel m_PktFilterRexmitLevel;
+    std::string m_sPeerPktFilterConfigString;
 
     // Attached tool function
     void EmitSignal(ETransmissionEvent tev, EventVariant var);
@@ -600,24 +604,47 @@ private:
     int m_iDeliveryRate;                         // Packet arrival rate at the receiver side
     int m_iByteDeliveryRate;                     // Byte arrival rate at the receiver side
 
-    uint64_t m_ullLingerExpiration;              // Linger expiration time (for GC to close a socket with data in sending buffer)
 
     CHandShake m_ConnReq;                        // connection request
     CHandShake m_ConnRes;                        // connection response
     CHandShake::RendezvousState m_RdvState;      // HSv5 rendezvous state
     HandshakeSide m_SrtHsSide;                   // HSv5 rendezvous handshake side resolved from cookie contest (DRAW if not yet resolved)
-    int64_t m_llLastReqTime;                     // last time when a connection request is sent
 
 private: // Sending related data
     CSndBuffer* m_pSndBuffer;                    // Sender buffer
     CSndLossList* m_pSndLossList;                // Sender loss list
-    CPktTimeWindow<16, 16> m_SndTimeWindow;            // Packet sending time window
+    CPktTimeWindow<16, 16> m_SndTimeWindow;      // Packet sending time window
 
-    volatile uint64_t m_ullInterval_tk;          // Inter-packet time, in CPU clock cycles
-    uint64_t m_ullTimeDiff_tk;                   // aggregate difference in inter-packet time
+    /*volatile*/ srt::sync::steady_clock::duration
+        m_tdSendInterval;                        // Inter-packet time, in CPU clock cycles
+
+    /*volatile*/ srt::sync::steady_clock::duration
+        m_tdSendTimeDiff;                        // aggregate difference in inter-packet sending time
 
     volatile int m_iFlowWindowSize;              // Flow control window size
     volatile double m_dCongestionWindow;         // congestion window size
+
+private: // Timers
+    /*volatile*/ srt::sync::steady_clock::time_point m_tsNextACKTime;    // Next ACK time, in CPU clock cycles, same below
+    /*volatile*/ srt::sync::steady_clock::time_point m_tsNextNAKTime;    // Next NAK time
+
+    /*volatile*/ srt::sync::steady_clock::duration   m_tdACKInterval;    // ACK interval
+    /*volatile*/ srt::sync::steady_clock::duration   m_tdNAKInterval;    // NAK interval
+    /*volatile*/ srt::sync::steady_clock::time_point m_tsLastRspTime;    // time stamp of last response from the peer
+    /*volatile*/ srt::sync::steady_clock::time_point m_tsLastRspAckTime; // time stamp of last ACK from the peer
+    /*volatile*/ srt::sync::steady_clock::time_point m_tsLastSndTime;    // time stamp of last data/ctrl sent (in system ticks)
+    srt::sync::steady_clock::time_point m_tsLastWarningTime;             // Last time that a warning message is sent
+    srt::sync::steady_clock::time_point m_tsLastReqTime;                 // last time when a connection request is sent
+    srt::sync::steady_clock::time_point m_tsRcvPeerStartTime;
+    srt::sync::steady_clock::time_point m_tsLingerExpiration;            // Linger expiration time (for GC to close a socket with data in sending buffer)
+    srt::sync::steady_clock::time_point m_tsLastAckTime;                 // Timestamp of last ACK
+    srt::sync::steady_clock::duration m_tdMinNakInterval;                // NAK timeout lower bound; too small value can cause unnecessary retransmission
+    srt::sync::steady_clock::duration m_tdMinExpInterval;                // timeout lower bound threshold: too small timeout can cause problem
+
+    int m_iPktCount;                          // packet counter for ACK
+    int m_iLightACKCount;                     // light ACK counter
+
+    srt::sync::steady_clock::time_point m_tsNextSendTime;     // scheduled time of next packet sending
 
     volatile int32_t m_iSndLastFullAck;          // Last full ACK received
     volatile int32_t m_iSndLastAck;              // Last ACK received
@@ -625,7 +652,7 @@ private: // Sending related data
     volatile int32_t m_iSndCurrSeqNo;            // The largest sequence number that has been sent
     int32_t m_iLastDecSeq;                       // Sequence number sent last decrease occurs
     int32_t m_iSndLastAck2;                      // Last ACK2 sent back
-    uint64_t m_ullSndLastAck2Time;               // The time when last ACK2 was sent back
+    srt::sync::steady_clock::time_point m_SndLastAck2Time;                // The time when last ACK2 was sent back
     int32_t m_iISN;                              // Initial Sequence Number
     bool m_bPeerTsbPd;                           // Peer accept TimeStamp-Based Rx mode
     bool m_bPeerTLPktDrop;                       // Enable sender late packet dropping
@@ -650,19 +677,17 @@ private: // Receiving related data
     int32_t m_iDebugPrevLastAck;
 #endif
     int32_t m_iRcvLastSkipAck;                   // Last dropped sequence ACK
-    uint64_t m_ullLastAckTime_tk;                // Timestamp of last ACK
     int32_t m_iRcvLastAckAck;                    // Last sent ACK that has been acknowledged
     int32_t m_iAckSeqNo;                         // Last ACK sequence number
     int32_t m_iRcvCurrSeqNo;                     // Largest received sequence number
-
-    uint64_t m_ullLastWarningTime;               // Last time that a warning message is sent
+    int32_t m_iRcvCurrPhySeqNo;                  // Same as m_iRcvCurrSeqNo, but physical only (disregarding a filter)
 
     int32_t m_iPeerISN;                          // Initial Sequence Number of the peer side
-    uint64_t m_ullRcvPeerStartTime;
 
     uint32_t m_lSrtVersion;
     uint32_t m_lMinimumPeerSrtVersion;
     uint32_t m_lPeerSrtVersion;
+    uint32_t m_lPeerSrtFlags;
 
     bool m_bTsbPd;                               // Peer sends TimeStamp-Based Packet Delivery Packets 
     pthread_t m_RcvTsbPdThread;                  // Rcv TsbPD Thread handle
@@ -690,7 +715,11 @@ private: // synchronization: mutexes and conditions
     pthread_cond_t m_SendBlockCond;              // used to block "send" call
     pthread_mutex_t m_SendBlockLock;             // lock associated to m_SendBlockCond
 
-    pthread_mutex_t m_AckLock;                   // used to protected sender's loss list when processing ACK
+    pthread_mutex_t m_RcvBufferLock;             // Protects the state of the m_pRcvBuffer
+
+    // Protects access to m_iSndCurrSeqNo, m_iSndLastAck
+    pthread_mutex_t m_RecvAckLock;               // Protects the state changes while processing incomming ACK (UDT_EPOLL_OUT)
+
 
     pthread_cond_t m_RecvDataCond;               // used to block "recv" when there is no data
     pthread_mutex_t m_RecvDataLock;              // lock associated to m_RecvDataCond
@@ -707,13 +736,32 @@ private: // synchronization: mutexes and conditions
     void releaseSynch();
 
 private: // Common connection Congestion Control setup
-    void setupCC();
-    void updateCC(ETransmissionEvent, EventVariant arg);
+
+    // This can fail only when it failed to create a congctl
+    // which only may happen when the congctl list is extended 
+    // with user-supplied congctl modules, not a case so far.
+    SRT_ATR_NODISCARD
+    SRT_REJECT_REASON setupCC();
+
+    // for updateCC it's ok to discard the value. This returns false only if
+    // the congctl isn't created, and this can be prevented from.
+    bool updateCC(ETransmissionEvent, EventVariant arg);
+
+    // Failure to create the crypter means that an encrypted
+    // connection should be rejected if ENFORCEDENCRYPTION is on.
+    SRT_ATR_NODISCARD
     bool createCrypter(HandshakeSide side, bool bidi);
 
 private: // Generation and processing of packets
-    void sendCtrl(UDTMessageType pkttype, void* lparam = NULL, void* rparam = NULL, int size = 0);
+    void sendCtrl(UDTMessageType pkttype, const void* lparam = NULL, void* rparam = NULL, int size = 0);
+
     void processCtrl(CPacket& ctrlpkt);
+    void sendLossReport(const std::vector< std::pair<int32_t, int32_t> >& losslist);
+    void processCtrlAck(const CPacket& ctrlpkt, const srt::sync::steady_clock::time_point &currtime);
+
+    ///
+    /// @param ackdata_seqno    sequence number of a data packet being acknowledged
+    void updateSndLossListOnACK(int32_t ackdata_seqno);
 
     /// Pack a packet from a list of lost packets.
     ///
@@ -721,20 +769,29 @@ private: // Generation and processing of packets
     /// @param origintime [in, out] origin timestamp of the packet
     ///
     /// @return payload size on success, <=0 on failure
-    int packLostData(CPacket& packet, uint64_t& origintime);
+    int packLostData(CPacket &packet, srt::sync::steady_clock::time_point &origintime);
 
-    int packData(CPacket& packet, uint64_t& ts);
+    /// Pack in CPacket the next data to be send.
+    ///
+    /// @param packet [in, out] a CPacket structure to fill
+    ///
+    /// @return A pair of values is returned (payload, timestamp).
+    ///         The payload tells the size of the payload, packed in CPacket.
+    ///         The timestamp is the full source/origin timestamp of the data.
+    ///         If payload is <= 0, consider the timestamp value invalid.
+    std::pair<int, srt::sync::steady_clock::time_point>
+        packData(CPacket& packet);
+
     int processData(CUnit* unit);
     void processClose();
-    SRT_REJECT_REASON processConnectRequest(const sockaddr* addr, CPacket& packet);
+    SRT_REJECT_REASON processConnectRequest(const sockaddr_any& addr, CPacket& packet);
     static void addLossRecord(std::vector<int32_t>& lossrecord, int32_t lo, int32_t hi);
-    int32_t bake(const sockaddr* addr, int32_t previous_cookie = 0, int correction = 0);
+    int32_t bake(const sockaddr_any& addr, int32_t previous_cookie = 0, int correction = 0);
 
 private: // Trace
-
     struct CoreStats
     {
-        uint64_t startTime;                 // timestamp when the UDT entity is started
+        srt::sync::steady_clock::time_point tsStartTime;                 // timestamp when the UDT entity is started
         int64_t sentTotal;                  // total number of sent data packets, including retransmissions
         int64_t recvTotal;                  // total number of received packets
         int sndLossTotal;                   // total number of lost packets (sender side)
@@ -754,9 +811,15 @@ private: // Trace
         uint64_t rcvBytesDropTotal;
         int m_rcvUndecryptTotal;
         uint64_t m_rcvBytesUndecryptTotal;
+
+        int sndFilterExtraTotal;
+        int rcvFilterExtraTotal;
+        int rcvFilterSupplyTotal;
+        int rcvFilterLossTotal;
+
         int64_t m_sndDurationTotal;         // total real time for sending
 
-        uint64_t lastSampleTime;            // last performance sample time
+        srt::sync::steady_clock::time_point tsLastSampleTime;            // last performance sample time
         int64_t traceSent;                  // number of packets sent in the last trace interval
         int64_t traceRecv;                  // number of packets received in the last trace interval
         int traceSndLoss;                   // number of lost packets in the last trace interval (sender side)
@@ -780,42 +843,30 @@ private: // Trace
         uint64_t traceRcvBytesDrop;
         int traceRcvUndecrypt;
         uint64_t traceRcvBytesUndecrypt;
+
+        int sndFilterExtra;
+        int rcvFilterExtra;
+        int rcvFilterSupply;
+        int rcvFilterLoss;
+
         int64_t sndDuration;                // real time for sending
-        int64_t sndDurationCounter;         // timers to record the sending duration
+        srt::sync::steady_clock::time_point sndDurationCounter;         // timers to record the sending Duration
     } m_stats;
 
 public:
-
     static const int SELF_CLOCK_INTERVAL = 64;  // ACK interval for self-clocking
     static const int SEND_LITE_ACK = sizeof(int32_t); // special size for ack containing only ack seq
     static const int PACKETPAIR_MASK = 0xF;
 
     static const size_t MAX_SID_LENGTH = 512;
 
-private: // Timers
-    uint64_t m_ullCPUFrequency;               // CPU clock frequency, used for Timer, ticks per microsecond
-    uint64_t m_ullNextACKTime_tk;             // Next ACK time, in CPU clock cycles, same below
-    uint64_t m_ullNextNAKTime_tk;             // Next NAK time
-
-    volatile uint64_t m_ullSYNInt_tk;         // SYN interval
-    volatile uint64_t m_ullACKInt_tk;         // ACK interval
-    volatile uint64_t m_ullNAKInt_tk;         // NAK interval
-    volatile uint64_t m_ullLastRspTime_tk;    // time stamp of last response from the peer
-    volatile uint64_t m_ullLastRspAckTime_tk; // time stamp of last ACK from the peer
-    volatile uint64_t m_ullLastSndTime_tk;    // time stamp of last data/ctrl sent (in system ticks)
-    uint64_t m_ullMinNakInt_tk;               // NAK timeout lower bound; too small value can cause unnecessary retransmission
-    uint64_t m_ullMinExpInt_tk;               // timeout lower bound threshold: too small timeout can cause problem
-
-    int m_iPktCount;                          // packet counter for ACK
-    int m_iLightACKCount;                     // light ACK counter
-
-    uint64_t m_ullTargetTime_tk;              // scheduled time of next packet sending
-
+private: // Timers functions
     void checkTimers();
-    void checkACKTimer (uint64_t currtime_tk);
-    void checkNAKTimer(uint64_t currtime_tk);
-    bool checkExpTimer (uint64_t currtime_tk);  // returns true if the connection is expired
-    void checkRexmitTimer(uint64_t currtime_tk);
+    void considerLegacySrtHandshake(const srt::sync::steady_clock::time_point &timebase);
+    void checkACKTimer (const srt::sync::steady_clock::time_point& currtime);
+    void checkNAKTimer(const srt::sync::steady_clock::time_point& currtime);
+    bool checkExpTimer (const srt::sync::steady_clock::time_point& currtime);  // returns true if the connection is expired
+    void checkRexmitTimer(const srt::sync::steady_clock::time_point& currtime);
 
 public: // For the use of CCryptoControl
     // HaiCrypt configuration
@@ -826,7 +877,7 @@ public: // For the use of CCryptoControl
 private: // for UDP multiplexer
     CSndQueue* m_pSndQueue;         // packet sending queue
     CRcvQueue* m_pRcvQueue;         // packet receiving queue
-    sockaddr* m_pPeerAddr;          // peer address
+    sockaddr_any m_PeerAddr;        // peer address
     uint32_t m_piSelfIP[4];         // local UDP IP address
     CSNode* m_pSNode;               // node information for UDT list used in snd queue
     CRNode* m_pRNode;               // node information for UDT list used in rcv queue

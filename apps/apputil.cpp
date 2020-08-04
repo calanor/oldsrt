@@ -81,30 +81,62 @@ int inet_pton(int af, const char * src, void * dst)
 }
 #endif // _WIN32 && !HAVE_INET_PTON
 
-sockaddr_in CreateAddrInet(const string& name, unsigned short port)
+sockaddr_any CreateAddr(const string& name, unsigned short port, int pref_family)
 {
-    sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-
-    if ( name != "" )
+    // Handle empty name.
+    // If family is specified, empty string resolves to ANY of that family.
+    // If not, it resolves to IPv4 ANY (to specify IPv6 any, use [::]).
+    if (name == "")
     {
-        if ( inet_pton(AF_INET, name.c_str(), &sa.sin_addr) == 1 )
-            return sa;
-
-        // XXX RACY!!! Use getaddrinfo() instead. Check portability.
-        // Windows/Linux declare it.
-        // See:
-        //  http://www.winsocketdotnetworkprogramming.com/winsock2programming/winsock2advancedInternet3b.html
-        hostent* he = gethostbyname(name.c_str());
-        if ( !he || he->h_addrtype != AF_INET )
-            throw invalid_argument("SrtSource: host not found: " + name);
-
-        sa.sin_addr = *(in_addr*)he->h_addr_list[0];
+        sockaddr_any result(pref_family == AF_INET6 ? pref_family : AF_INET);
+        result.hport(port);
+        return result;
     }
 
-    return sa;
+    bool first6 = pref_family != AF_INET;
+    int families[2] = {AF_INET6, AF_INET};
+    if (!first6)
+    {
+        families[0] = AF_INET;
+        families[1] = AF_INET6;
+    }
+
+    for (int i = 0; i < 2; ++i)
+    {
+        int family = families[i];
+        sockaddr_any result (family);
+
+        // Try to resolve the name by pton first
+        if (inet_pton(family, name.c_str(), result.get_addr()) == 1)
+        {
+            result.hport(port); // same addr location in ipv4 and ipv6
+            return result;
+        }
+    }
+
+    // If not, try to resolve by getaddrinfo
+    // This time, use the exact value of pref_family
+
+    sockaddr_any result;
+    addrinfo fo = {
+        0,
+        pref_family,
+        0, 0,
+        0, 0,
+        NULL, NULL
+    };
+
+    addrinfo* val = nullptr;
+    int erc = getaddrinfo(name.c_str(), nullptr, &fo, &val);
+    if (erc == 0)
+    {
+        result.set(val->ai_addr);
+        result.len = result.size();
+        result.hport(port); // same addr location in ipv4 and ipv6
+    }
+    freeaddrinfo(val);
+
+    return result;
 }
 
 string Join(const vector<string>& in, string sep)
@@ -127,7 +159,6 @@ OptionScheme::Args OptionName::DetermineTypeFromHelpText(const std::string& help
     if (helptext.empty())
         return OptionScheme::ARG_NONE;
 
-
     if (helptext[0] == '<')
     {
         // If the argument is <one-argument>, then it's ARG_NONE.
@@ -135,10 +166,13 @@ OptionScheme::Args OptionName::DetermineTypeFromHelpText(const std::string& help
         // When closing angle bracket isn't found, fallback to ARG_ONE.
         size_t pos = helptext.find('>');
         if (pos == std::string::npos)
-            return OptionScheme::ARG_ONE;
+            return OptionScheme::ARG_ONE; // mistake, but acceptable
 
-        if (pos >= 4 && helptext.substr(pos-4, 4) == "...>")
+        if (pos >= 4 && helptext.substr(pos-3, 4) == "...>")
             return OptionScheme::ARG_VAR;
+
+        // We have < and > without ..., simply one argument
+        return OptionScheme::ARG_ONE;
     }
 
     if (helptext[0] == '[')
@@ -169,6 +203,7 @@ options_t ProcessOptions(char* const* argv, int argc, std::vector<OptionScheme> 
         // cout << "*D ARG: '" << a << "'\n";
         if (moreoptions && a[0] == '-')
         {
+            bool arg_specified = false;
             size_t seppos; // (see goto, it would jump over initialization)
             current_key = a+1;
             if ( current_key == "-" )
@@ -191,6 +226,7 @@ options_t ProcessOptions(char* const* argv, int argc, std::vector<OptionScheme> 
                 // Old option specification.
                 extra_arg = current_key.substr(seppos + 1);
                 current_key = current_key.substr(0, 0 + seppos);
+                arg_specified = true; // Prevent eating args from option list
             }
 
             params[current_key].clear();
@@ -209,7 +245,11 @@ options_t ProcessOptions(char* const* argv, int argc, std::vector<OptionScheme> 
                 if (s.names().count(current_key))
                 {
                     // cout << "*D found '" << current_key << "' in scheme type=" << int(s.type) << endl;
-                    if (s.type == OptionScheme::ARG_NONE)
+                    // If argument was specified using the old way, like
+                    // -v:0 or "-v 0", then consider the argument specified and
+                    // treat further arguments as either no-option arguments or
+                    // new options.
+                    if (s.type == OptionScheme::ARG_NONE || arg_specified)
                     {
                         // Anyway, consider it already processed.
                         break;
@@ -325,6 +365,7 @@ public:
         output << "\"send\":{";
         output << "\"packets\":" << mon.pktSent << ",";
         output << "\"packetsTotal\":" << mon.pktSentTotal << ",";
+        output << "\"packetsUnique\":" << mon.pktSentUnique << ",";
         output << "\"packetsLost\":" << mon.pktSndLoss << ",";
         output << "\"packetsLostTotal\":" << mon.pktSndLossTotal << ",";
         output << "\"packetsDropped\":" << mon.pktSndDrop << ",";
@@ -333,12 +374,14 @@ public:
         output << "\"packetsRetransmittedTotal\":" << mon.pktRetransTotal << ",";
         output << "\"packetsFilterExtra\":" << mon.pktSndFilterExtra << ",";
         output << "\"bytes\":" << mon.byteSent << ",";
+        output << "\"bytesUnique\":" << mon.byteSentUnique << ",";
         output << "\"bytesDropped\":" << mon.byteSndDrop << ",";
         output << "\"mbitRate\":" << mon.mbpsSendRate;
         output << "},";
         output << "\"recv\": {";
         output << "\"packets\":" << mon.pktRecv << ",";
         output << "\"packetsTotal\":" << mon.pktRecvTotal << ",";
+        output << "\"packetsUnique\":" << mon.pktRecvUnique << ",";
         output << "\"packetsLost\":" << mon.pktRcvLoss << ",";
         output << "\"packetsLostTotal\":" << mon.pktRcvLossTotal << ",";
         output << "\"packetsDropped\":" << mon.pktRcvDrop << ",";
@@ -349,6 +392,7 @@ public:
         output << "\"packetsFilterSupply\":" << mon.pktRcvFilterSupply << ",";
         output << "\"packetsFilterLoss\":" << mon.pktRcvFilterLoss << ",";
         output << "\"bytes\":" << mon.byteRecv << ",";
+        output << "\"bytesUnique\":" << mon.byteRecvUnique << ",";
         output << "\"bytesLost\":" << mon.byteRcvLoss << ",";
         output << "\"bytesDropped\":" << mon.byteRcvDrop << ",";
         output << "\"mbitRate\":" << mon.mbpsRecvRate;

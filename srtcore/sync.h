@@ -329,6 +329,7 @@ public:
     ~UniqueLock();
 
 public:
+    void lock();
     void unlock();
     Mutex* mutex(); // reflects C++11 unique_lock::mutex()
 
@@ -729,7 +730,7 @@ public:
     /// To be used only in StartThread function.
     /// Creates a new stread and assigns to this.
     /// @throw CThreadException
-    inline void create_thread(void *(*start_routine) (void *), void *arg);
+    void create_thread(void *(*start_routine) (void *), void *arg);
 #endif
 
 public: // Observers

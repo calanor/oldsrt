@@ -1148,6 +1148,15 @@ Connect_Again:
                     NULL, NULL,
                     NULL, NULL) != -1)
         {
+            Verb() << "[C]" << VerbNoEOL;
+            for (int i = 0; i < len1; ++i)
+                Verb() << " " << ready_conn[i] << VerbNoEOL;
+            Verb() << "[E]" << VerbNoEOL;
+            for (int i = 0; i < len2; ++i)
+                Verb() << " " << ready_err[i] << VerbNoEOL;
+
+            Verb() << "";
+
             // We are waiting for one entity to be ready so it's either
             // in one or the other
             if (find(ready_err, ready_err+len2, m_sock) != ready_err+len2)
@@ -1174,8 +1183,7 @@ Connect_Again:
                         --transmit_retry_connect;
 
 
-                    Verb() << "...all links timeout, retrying in 250ms (" << transmit_retry_connect << ")...";
-                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    Verb() << "...all links timeout, retrying NOW (" << transmit_retry_connect << ")...";
                     goto Connect_Again;
                 }
 
@@ -2288,6 +2296,7 @@ Epoll_again:
                         // If the event was SRT_EPOLL_UPDATE, report it, and still wait.
 
                         bool any_read_ready = false;
+                        vector<int> errored;
                         for (int i = 0; i < len; ++i)
                         {
                             if (sready[i].events & SRT_EPOLL_UPDATE)
@@ -2297,11 +2306,16 @@ Epoll_again:
 
                             if (sready[i].events & SRT_EPOLL_IN)
                                 any_read_ready = true;
+
+                            if (sready[i].events & SRT_EPOLL_ERR)
+                            {
+                                errored.push_back(sready[i].fd);
+                            }
                         }
 
                         if (!any_read_ready)
                         {
-                            Verb() << " ... [NOT READ READY - AGAIN]";
+                            Verb() << " ... [NOT READ READY - AGAIN (" << errored.size() << " errored: " << Printable(errored) << ")]";
                             goto Epoll_again;
                         }
 

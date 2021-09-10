@@ -19,6 +19,8 @@
 
 #include "packetfilter_api.h"
 
+namespace srt {
+
 class FECFilterBuiltin: public SrtPacketFilterBase
 {
     SrtFilterConfig cfg;
@@ -196,11 +198,16 @@ private:
 
     enum EHangStatus
     {
+        HANG_NOTDONE,
         HANG_SUCCESS,
         HANG_PAST,
-        HANG_CRAZY,
-        HANG_NOTDONE
+        HANG_CRAZY
     };
+
+    friend bool operator <(FECFilterBuiltin::EHangStatus a, FECFilterBuiltin::EHangStatus b)
+    {
+        return int(a) < int(b);
+    }
 
     EHangStatus HangHorizontal(const CPacket& pkt, bool fec_ctl, loss_seqs_t& irrecover);
     EHangStatus HangVertical(const CPacket& pkt, signed char fec_colx, loss_seqs_t& irrecover);
@@ -260,6 +267,11 @@ public:
     static const size_t EXTRA_SIZE = 4;
 
     virtual SRT_ARQLevel arqLevel() ATR_OVERRIDE { return m_fallback_level; }
+
+    static const char defaultConfig [];
+    static bool verifyConfig(const SrtFilterConfig& config, std::string& w_errormsg);
 };
+
+} // namespace srt
 
 #endif
